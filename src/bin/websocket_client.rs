@@ -1,6 +1,7 @@
 use base64::prelude::*;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::env;
 use std::io::{self, Write};
 use tokio::sync::mpsc;
@@ -9,9 +10,9 @@ use tokio_tungstenite::{
 };
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::sync::{Arc, Mutex};
 
-// mod audio_player;
-// use audio_player::AudioPlayer;
+const OPENAI_SAMPLE_RATE: u32 = 24000; // The sample rate of the audio data coming from OpenAI
 
 async fn response_create(tx: mpsc::UnboundedSender<Message>) {
     let event = serde_json::json!({
@@ -25,9 +26,6 @@ async fn response_create(tx: mpsc::UnboundedSender<Message>) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a new AudioPlayer instance
-    // let mut audio_player = AudioPlayer::new()?;
-
     // Define the URL for the WebSocket connection
     let url: &str = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01";
 
@@ -57,6 +55,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create an mpsc channel to send events to the write task
     let (tx, mut rx) = mpsc::unbounded_channel();
 
+    // Create a thread-safe, growable buffer for output audio samples
+    let audio_buffer = Arc::new(Mutex::new(VecDeque::new()));
+
+    // Clone the buffer for use in the audio playback thread
+    let playback_buffer = Arc::clone(&audio_buffer);
+
+    // Initialize audio playback stream
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .expect("no output device available");
+    let config = device.default_output_config().unwrap();
+    let output_sample_rate = config.sample_rate().0; // Get the output sample rate
+
+    let stream = device
+        .build_output_stream(
+            &config.into(),
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                let mut buffer = playback_buffer.lock().unwrap();
+                for sample in data.iter_mut() {
+                    *sample = buffer.pop_front().unwrap_or(0.0);
+                }
+            },
+            |err| eprintln!("An error occurred on the output stream: {}", err),
+            None,
+        )
+        .unwrap();
+
+    stream.play().unwrap();
+
     // Spawn a task to handle sending events
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
@@ -68,22 +96,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Spawn a task to handle reading incoming events
+    let buffer_for_ws = Arc::clone(&audio_buffer);
     let read_handle = tokio::spawn(async move {
         read.for_each(|event| async {
             match event {
                 Ok(Message::Text(text)) => {
-                    // Parse the incoming message as JSON
                     let json: Value = serde_json::from_str(&text).unwrap();
-
-                    // Check if the event is of type "response.audio.delta"
                     if json["type"] == "response.audio.delta" {
-                        // Extract the audio data from the message
-                        let audio_data = json["delta"].as_str().unwrap();
+                        let base64_audio_data = json["delta"].as_str().unwrap();
+                        let audio_data = BASE64_STANDARD.decode(base64_audio_data).unwrap();
 
-                        // Decode the base64-encoded audio data
-                        let decoded_audio = BASE64_STANDARD.decode(audio_data).unwrap();
+                        // Convert audio data to f32 samples
+                        let samples: Vec<f32> = audio_data
+                            .chunks_exact(2)
+                            .map(|chunk| {
+                                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                                f32::from(sample) / i16::MAX as f32
+                            })
+                            .collect();
 
-                        // Play the audio
+                        // Resample the audio data to match the output sample rate
+                        // TODO
+
+                        // Add the new samples to the buffer
+                        let mut buffer = buffer_for_ws.lock().unwrap();
+                        buffer.extend(samples);
                     }
                     // Check if the event is of type "response.audio_transcript.delta"
                     else if json["type"] == "response.audio_transcript.delta" {
@@ -113,11 +150,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "content": [
                 {
                     "type": "input_text",
-                    "text": "Hello OpenAI"
+                    "text": "Make up a poem about the birth of the universe."
                 }
             ]
         }
     });
+
     tx.send(Message::Text(test_message.to_string())).unwrap();
     response_create(tx).await;
 
