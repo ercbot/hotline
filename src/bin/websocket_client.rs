@@ -1,25 +1,27 @@
-use std::env;
-use futures_util::{StreamExt, SinkExt};
-use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest, tungstenite::protocol::Message};
-use serde_json::Value;
 use base64::prelude::*;
+use futures_util::{SinkExt, StreamExt};
+use serde_json::Value;
+use std::env;
+use std::io::{self, Write};
+use tokio::sync::mpsc;
+use tokio_tungstenite::{
+    connect_async, tungstenite::client::IntoClientRequest, tungstenite::protocol::Message,
+};
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 // mod audio_player;
 // use audio_player::AudioPlayer;
 
-
-async fn response_create(tx : mpsc::UnboundedSender<Message>) {
+async fn response_create(tx: mpsc::UnboundedSender<Message>) {
     let event = serde_json::json!({
         "type": "response.create"
     });
-    
+
     if let Err(e) = tx.send(Message::Text(event.to_string())) {
         eprintln!("Error sending message: {}", e);
     }
 }
-
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,9 +41,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let headers = request.headers_mut();
 
     // Add the necessary headers to the request
-    headers.insert("Authorization", format!("Bearer {}", api_key).parse().unwrap());
+    headers.insert(
+        "Authorization",
+        format!("Bearer {}", api_key).parse().unwrap(),
+    );
     headers.insert("OpenAI-Beta", "realtime=v1".parse().unwrap());
-    
+
     // Connect to the WebSocket server
     let (ws_stream, _) = connect_async(request).await?;
     println!("Connected to WebSocket server");
@@ -79,8 +84,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let decoded_audio = BASE64_STANDARD.decode(audio_data).unwrap();
 
                         // Play the audio
-                        // audio_player.play_audio(&decoded_audio).unwrap();
-                        // println!("Playing audio...");
                     }
                     // Check if the event is of type "response.audio_transcript.delta"
                     else if json["type"] == "response.audio_transcript.delta" {
@@ -89,16 +92,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Print the transcript
                         print!("{}", transcript);
-                    }
-                    else {
+                        io::stdout().flush().unwrap();
+                    } else {
                         // println!("{}", json);
                     }
-
                 }
                 Ok(_) => (),
                 Err(e) => eprintln!("Error receiving message: {}", e),
             }
-        }).await;
+        })
+        .await;
     });
 
     // Example of sending a message (you can replace this with actual audio input handling)
@@ -117,7 +120,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     tx.send(Message::Text(test_message.to_string())).unwrap();
     response_create(tx).await;
-
 
     // Wait for the read task to complete
     read_handle.await?;
