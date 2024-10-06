@@ -12,7 +12,7 @@ use tokio_tungstenite::{
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{Arc, Mutex};
 
-const OPENAI_SAMPLE_RATE: u32 = 24000; // The sample rate of the audio data coming from OpenAI
+const SERVER_SAMPLE_RATE: u32 = 24000; // The sample rate of the audio data coming from OpenAI
 
 async fn response_create(tx: mpsc::UnboundedSender<Message>) {
     let event = serde_json::json!({
@@ -68,6 +68,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("no output device available");
     let config = device.default_output_config().unwrap();
     let output_sample_rate = config.sample_rate().0; // Get the output sample rate
+    let channels = config.channels(); // Get the number of channels
+
+    println!("Output Channels: {}", channels);
 
     let stream = device
         .build_output_stream(
@@ -99,10 +102,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let buffer_for_ws = Arc::clone(&audio_buffer);
     let read_handle = tokio::spawn(async move {
         read.for_each(|event| async {
+
             match event {
                 Ok(Message::Text(text)) => {
                     let json: Value = serde_json::from_str(&text).unwrap();
                     if json["type"] == "response.audio.delta" {
+                        
                         let base64_audio_data = json["delta"].as_str().unwrap();
                         let audio_data = BASE64_STANDARD.decode(base64_audio_data).unwrap();
 
@@ -115,12 +120,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             })
                             .collect();
 
-                        // Resample the audio data to match the output sample rate
-                        // TODO
+                        // Basic resampling
 
+                        // I have no idea why I need to multiply by 2.0, perhaps it's because the audio data is stereo?
+                        // but I haven't found any documentation confirming that. I just tried it and it worked.
+                        let resample_ratio = (output_sample_rate as f32 / SERVER_SAMPLE_RATE as f32) * 2.0; 
+                        
+                        let output_length = (samples.len() as f32 * resample_ratio) as usize;
+                        let mut resampled_audio = Vec::with_capacity(output_length);
+
+                        // Loop through the output length to generate resampled audio
+                        for i in 0..output_length {
+                            // Calculate the corresponding index in the input samples
+                            let index = i as f32 / resample_ratio;
+                            let index_floor = index.floor() as usize;
+                            let index_ceil = index.ceil() as usize;
+
+                            // If the ceiling index is out of bounds, use the last sample
+                            if index_ceil >= samples.len() {
+                                resampled_audio.push(samples[samples.len() - 1]);
+                            } else {
+                                // Perform linear interpolation between the floor and ceiling samples
+                                let t = index - index_floor as f32;
+                                let sample = samples[index_floor] * (1.0 - t) + samples[index_ceil] * t;
+                                resampled_audio.push(sample);
+                            }
+                        }
+                    
                         // Add the new samples to the buffer
                         let mut buffer = buffer_for_ws.lock().unwrap();
-                        buffer.extend(samples);
+                        buffer.extend(resampled_audio);
                     }
                     // Check if the event is of type "response.audio_transcript.delta"
                     else if json["type"] == "response.audio_transcript.delta" {
