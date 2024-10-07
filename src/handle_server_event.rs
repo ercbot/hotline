@@ -1,15 +1,10 @@
 use base64::prelude::*;
-use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::VecDeque;
-use std::env;
 use std::io::{self, Write};
-use tokio::sync::mpsc;
-use tokio_tungstenite::{
-    connect_async, tungstenite::client::IntoClientRequest, tungstenite::protocol::Message,
-};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use tokio_tungstenite::tungstenite::protocol::Message;
+
 use std::sync::{Arc, Mutex};
 
 
