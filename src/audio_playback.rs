@@ -2,7 +2,6 @@ use cpal::traits::{DeviceTrait, HostTrait};
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 
-
 pub fn initialize_audio_playback(audio_buffer: Arc<Mutex<VecDeque<f32>>>) -> Result<(cpal::Stream, u32), Box<dyn std::error::Error>> {
     // Initialize audio playback stream
     let host = cpal::default_host();

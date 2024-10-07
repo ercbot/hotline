@@ -1,5 +1,5 @@
 use base64::prelude::*;
-use cpal::traits::StreamTrait;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -17,6 +17,9 @@ use handle_server_event::handle_server_event;
 
 mod audio_playback;
 use audio_playback::initialize_audio_playback;
+
+mod audio_utils;
+use audio_utils::{base64_encode_audio, resample_audio, SERVER_SAMPLE_RATE};
 
 async fn response_create(tx: mpsc::UnboundedSender<Message>) {
     let event = serde_json::json!({
@@ -87,25 +90,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Example of sending a message (you can replace this with actual audio input handling)
-    let test_message = serde_json::json!({
-        "type": "conversation.item.create",
-        "item": {
-            "type": "message",
-            "role": "user",
-            "content": [
-                {
-                    "type": "input_text",
-                    "text": "Make up a poem about the birth of the universe."
-                }
-            ]
+    // let test_message = serde_json::json!({
+    //     "type": "conversation.item.create",
+    //     "item": {
+    //         "type": "message",
+    //         "role": "user",
+    //         "content": [
+    //             {
+    //                 "type": "input_text",
+    //                 "text": "Make up a poem about the birth of the universe."
+    //             }
+    //         ]
+    //     }
+    // });
+
+    // tx.send(Message::Text(test_message.to_string())).unwrap();
+
+    // Set up audio input
+    let host = cpal::default_host();
+    let input_device = host.default_input_device().expect("No input device available");
+    let input_config = input_device.default_input_config().unwrap();
+
+    let input_sample_rate = input_config.sample_rate().0;
+
+    let tx_clone = tx.clone();
+    let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {        
+        let resampled_data = resample_audio(data, input_sample_rate, SERVER_SAMPLE_RATE);
+
+        let base64_audio = base64_encode_audio(&resampled_data);
+
+        let audio_event = serde_json::json!({
+            "type": "input_audio_buffer.append",
+            "audio": base64_audio
+        });
+
+        if let Err(e) = tx_clone.send(Message::Text(audio_event.to_string())) {
+            eprintln!("Error sending audio data: {}", e);
         }
-    });
+    };
 
-    tx.send(Message::Text(test_message.to_string())).unwrap();
-    response_create(tx).await;
+    let input_stream = input_device.build_input_stream(
+        &input_config.into(),
+        input_data_fn,
+        |err| eprintln!("Error in input stream: {}", err),
+        None,
+    )?;
 
-    // Wait for the read task to complete
-    read_handle.await?;
+    input_stream.play()?;
+
+    // Start capturing and sending audio
+    // println!("Start speaking into the microphone...");
+    // tokio::time::sleep(tokio::time::Duration::from_secs(5)).await; // Capture for 5 seconds
+
+    // Commit the audio buffer and request a response
+    // tx.send(Message::Text(serde_json::json!({"type": "input_audio_buffer.commit"}).to_string())).unwrap();
+    // response_create(tx).await;
+
+    // keep the read handle alive
+    read_handle.await.unwrap();
 
     Ok(())
 }

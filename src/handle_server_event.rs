@@ -8,7 +8,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use std::sync::{Arc, Mutex};
 
 
-const SERVER_SAMPLE_RATE: u32 = 24000; // The sample rate of the audio data coming from OpenAI
+use crate::audio_utils::{base64_decode_audio, resample_audio, SERVER_SAMPLE_RATE};
 
 
 pub async fn handle_server_event(event: Result<Message, tokio_tungstenite::tungstenite::Error>, buffer_for_ws: &Arc<Mutex<VecDeque<f32>>>, output_sample_rate: u32) {
@@ -18,43 +18,12 @@ pub async fn handle_server_event(event: Result<Message, tokio_tungstenite::tungs
             if json["type"] == "response.audio.delta" {
                 
                 let base64_audio_data = json["delta"].as_str().unwrap();
-                let audio_data = BASE64_STANDARD.decode(base64_audio_data).unwrap();
-
-                // Convert audio data to f32 samples
-                let samples: Vec<f32> = audio_data
-                    .chunks_exact(2)
-                    .map(|chunk| {
-                        let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                        f32::from(sample) / i16::MAX as f32
-                    })
-                    .collect();
+                
+                // Decode the base64 audio data
+                let samples = base64_decode_audio(base64_audio_data);
 
                 // Basic resampling
-
-                // I have no idea why I need to multiply by 2.0, perhaps it's because the audio data is stereo?
-                // but I haven't found any documentation confirming that. I just tried it and it worked.
-                let resample_ratio = (output_sample_rate as f32 / SERVER_SAMPLE_RATE as f32) * 2.0; 
-                
-                let output_length = (samples.len() as f32 * resample_ratio) as usize;
-                let mut resampled_audio = Vec::with_capacity(output_length);
-
-                // Loop through the output length to generate resampled audio
-                for i in 0..output_length {
-                    // Calculate the corresponding index in the input samples
-                    let index = i as f32 / resample_ratio;
-                    let index_floor = index.floor() as usize;
-                    let index_ceil = index.ceil() as usize;
-
-                    // If the ceiling index is out of bounds, use the last sample
-                    if index_ceil >= samples.len() {
-                        resampled_audio.push(samples[samples.len() - 1]);
-                    } else {
-                        // Perform linear interpolation between the floor and ceiling samples
-                        let t = index - index_floor as f32;
-                        let sample = samples[index_floor] * (1.0 - t) + samples[index_ceil] * t;
-                        resampled_audio.push(sample);
-                    }
-                }
+                let resampled_audio = resample_audio(&samples, SERVER_SAMPLE_RATE, output_sample_rate);
             
                 // Add the new samples to the buffer
                 let mut buffer = buffer_for_ws.lock().unwrap();
