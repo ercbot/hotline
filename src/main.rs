@@ -1,6 +1,6 @@
 mod client;
 mod handle_events;
-// mod audio_playback;
+mod audio_utils;
 
 use client::RealtimeClient;
 
@@ -14,7 +14,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Send a user message
     client.send_user_message_content(serde_json::json!({"text": "Hello, AI!"})).await?;
-
 
     // Keep the main function alive to simulate continuous interaction
     loop {

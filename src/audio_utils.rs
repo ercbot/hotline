@@ -1,7 +1,74 @@
 use base64::prelude::*;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::sync::mpsc;
+use std::thread;
+
+use ringbuf::{traits::{Consumer, Observer, Producer, Split}, HeapRb};
 
 pub const SERVER_SAMPLE_RATE: u32 = 24000; // The sample rate of the audio data coming from OpenAI
+const RING_BUFFER_CAPACITY: usize = 240_000; // 10 seconds of audio at 24,000 Hz
 
+/// Initializes the audio stream and returns the audio sender and output sample rate.
+///
+/// This function sets up the audio device, configures the output stream, and starts a separate
+/// thread to handle audio playback. It returns a sender for audio samples and the output sample rate.
+pub fn initialize_audio_stream() -> (mpsc::Sender<Vec<f32>>, u32) {
+    // Initialize audio components
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .expect("No output device available");
+    let config = device.default_output_config().unwrap();
+    let output_sample_rate = config.sample_rate().0;
+
+    // Create a standard channel for audio samples
+    let (audio_sender, audio_receiver) = mpsc::channel::<Vec<f32>>();
+
+    // Clone the device and config to move into the audio thread
+    let device_clone = device.clone();
+    let config_clone = config.clone();
+
+    // Start the audio playback thread (synchronous)
+    thread::spawn(move || {
+        // Use the cloned device and config to build the output stream
+        let device = device_clone;
+        let config = config_clone;
+
+        // Create the ring buffer
+        let audio_buffer = HeapRb::<f32>::new(RING_BUFFER_CAPACITY);
+        let (mut producer, mut consumer) = audio_buffer.split();
+
+        let stream = device
+            .build_output_stream(
+                &config.into(),
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    for sample in data.iter_mut() {
+                        *sample = consumer.try_pop().unwrap_or(0.0);
+                    }
+                },
+                |err| eprintln!("An error occurred on the output stream: {}", err),
+                None,
+            )
+            .unwrap();
+
+        stream.play().unwrap();
+
+        // Continuously receive audio samples and push them into the ring buffer
+        while let Ok(samples) = audio_receiver.recv() {
+            for sample in samples {
+                // Handle buffer full situation
+                if producer.is_full() {
+                    eprintln!("Warning: Audio buffer is full, dropping sample.");
+                } else {
+                    producer.try_push(sample).unwrap();
+                }
+            }
+        }
+    });
+
+    // Return the sender and output sample rate
+    (audio_sender, output_sample_rate)
+}
 
 // Handling User Input -> Server
 // Function to convert f32 audio samples to i16 PCM in base64 format
