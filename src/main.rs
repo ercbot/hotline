@@ -1,10 +1,13 @@
 use base64::prelude::*;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use crossterm::terminal::enable_raw_mode;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::env;
 use std::io::{self, Write};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
     connect_async, tungstenite::client::IntoClientRequest, tungstenite::protocol::Message,
@@ -89,23 +92,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
     });
 
-    // Example of sending a message (you can replace this with actual audio input handling)
-    // let test_message = serde_json::json!({
-    //     "type": "conversation.item.create",
-    //     "item": {
-    //         "type": "message",
-    //         "role": "user",
-    //         "content": [
-    //             {
-    //                 "type": "input_text",
-    //                 "text": "Make up a poem about the birth of the universe."
-    //             }
-    //         ]
-    //     }
-    // });
-
-    // tx.send(Message::Text(test_message.to_string())).unwrap();
-
     // Set up audio input
     let host = cpal::default_host();
     let input_device = host.default_input_device().expect("No input device available");
@@ -113,19 +99,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let input_sample_rate = input_config.sample_rate().0;
 
+    // Create a flag to indicate whether we're currently recording
+    let is_recording = Arc::new(Mutex::new(false));
+
     let tx_clone = tx.clone();
-    let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {        
-        let resampled_data = resample_audio(data, input_sample_rate, SERVER_SAMPLE_RATE);
+    let is_recording_clone = Arc::clone(&is_recording);
+    let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {
+        let is_rec = *is_recording_clone.lock().unwrap();
+        if is_rec {
+            let resampled_data = resample_audio(data, input_sample_rate, SERVER_SAMPLE_RATE);
+            let base64_audio = base64_encode_audio(&resampled_data);
 
-        let base64_audio = base64_encode_audio(&resampled_data);
+            let audio_event = serde_json::json!({
+                "type": "input_audio_buffer.append",
+                "audio": base64_audio
+            });
 
-        let audio_event = serde_json::json!({
-            "type": "input_audio_buffer.append",
-            "audio": base64_audio
-        });
-
-        if let Err(e) = tx_clone.send(Message::Text(audio_event.to_string())) {
-            eprintln!("Error sending audio data: {}", e);
+            if let Err(e) = tx_clone.send(Message::Text(audio_event.to_string())) {
+                eprintln!("Error sending audio data: {}", e);
+            }
         }
     };
 
@@ -138,16 +130,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     input_stream.play()?;
 
-    // Start capturing and sending audio
-    // println!("Start speaking into the microphone...");
-    // tokio::time::sleep(tokio::time::Duration::from_secs(5)).await; // Capture for 5 seconds
+    // Enable raw mode for terminal input
+    enable_raw_mode()?;
 
-    // Commit the audio buffer and request a response
-    // tx.send(Message::Text(serde_json::json!({"type": "input_audio_buffer.commit"}).to_string())).unwrap();
-    // response_create(tx).await;
+    println!("Push-to-Talk enabled. Hold SPACE to record.");
 
-    // keep the read handle alive
-    read_handle.await.unwrap();
+    // Main event loop
+    let mut last_key_time = Instant::now();
+
+    // Set a timeout for the key press
+    let key_timeout = Duration::from_millis(500);
+
+    loop {
+        if event::poll(Duration::from_millis(10))? {
+            if let Event::Key(key_event) = event::read()? {
+                match key_event.code {
+                    KeyCode::Char(' ') => {
+                        last_key_time = Instant::now();
+                        let mut is_rec = is_recording.lock().unwrap();
+                        if !*is_rec {
+                            *is_rec = true;
+                            println!("Recording started");
+                        }
+                    }
+                    KeyCode::Esc => {
+                        println!("Exiting...");
+                        break;
+                    }
+                    KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        println!("Exiting...");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        } else if *is_recording.lock().unwrap() && last_key_time.elapsed() > key_timeout {
+            let mut is_rec = is_recording.lock().unwrap();
+            *is_rec = false;
+            println!("Recording stopped");
+        }
+
+        // Add a small delay to prevent the loop from running too fast
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+
 
     Ok(())
 }
