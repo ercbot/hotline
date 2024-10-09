@@ -5,12 +5,12 @@ use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest, M
 use futures::{SinkExt, StreamExt};
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
-use async_trait::async_trait;
 use uuid::Uuid;
 use url::Url;
 
 use tokio::sync::mpsc;
-use tokio::task;
+
+use crate::handle_events::handle_events;
 
 // Defaults
 const DEFAULT_URL: &str = "wss://api.openai.com/v1/realtime";
@@ -54,25 +54,8 @@ impl Default for SessionConfig {
     }
 }
 
-
-
-/// Represents an item in the conversation (message, function call, etc.)
-#[derive(Debug, Serialize, Deserialize)]
-struct Item {
-    id: String,
-    object: String,
-    role: Option<String>,  // "user", "assistant", or "system"
-    formatted: Value,      // The content of the item, which can vary based on type
-}
-
-/// Trait for handling events from the API
-#[async_trait]
-trait EventHandler {
-    async fn on_event(&mut self, event: &str, origin: &str, data: Option<&Value>);
-}
-
 /// Main client for interacting with the OpenAI Realtime API
-struct RealtimeClient {
+pub struct RealtimeClient {
     url: String,                                                    // WebSocket URL
     api_key: String,                                                // OpenAI API key
 
@@ -87,7 +70,7 @@ struct RealtimeClient {
 
 impl RealtimeClient {
     /// Creates a new RealtimeClient with default configuration
-    fn new(url: Option<&str>, api_key: Option<&str>) -> Self {
+    pub fn new(url: Option<&str>, api_key: Option<&str>) -> Self {
 
         let (event_sender, event_receiver) = mpsc::channel(100);
         
@@ -116,7 +99,7 @@ impl RealtimeClient {
     }
 
     /// Establishes a WebSocket connection with the OpenAI Realtime API
-    async fn connect(&mut self, model: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn connect(&mut self, model: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         if self.is_connected {
             return Err("RealtimeClient is already , use .disconnect() first".into());
         }
@@ -148,14 +131,14 @@ impl RealtimeClient {
 
         self.is_connected = true;
         
-        // self.start_handling_messages().await?;  // Start handling incoming messages
+        self.start_handling_messages().await?;  // Start handling incoming messages
 
         self.update_session().await?;  // Send session configuration
         Ok(())
     }
 
     /// Closes the WebSocket connection
-    async fn disconnect(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn disconnect(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.is_connected {
             if let Some(ws_write) = &mut self.ws_write {
                 ws_write.send(Message::Close(None)).await?;
@@ -171,7 +154,7 @@ impl RealtimeClient {
     }
 
     /// Sends the current session configuration to the API
-    async fn update_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn update_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let data = serde_json::to_value(serde_json::json!({"session": self.session_config}))?;
         self.send("session.update", Some(data)).await?;
 
@@ -179,7 +162,7 @@ impl RealtimeClient {
     }
 
     /// Sends a user message to the API
-    async fn send_user_message_content(&mut self, content: Value) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn send_user_message_content(&mut self, content: Value) -> Result<(), Box<dyn std::error::Error>> {
         
         self.send("conversation.item.create", Some(serde_json::json!({
             "item": {
@@ -195,11 +178,13 @@ impl RealtimeClient {
     }
 
     /// Requests the API to generate a response
-    async fn create_response(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn create_response(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.send("response.create", None).await?;
         
         Ok(())
     }
+
+    // Private methods
 
     /// Starts handling incoming messages in a separate task
     async fn start_handling_messages(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -254,48 +239,3 @@ impl RealtimeClient {
     }
 
 }
-
-async fn handle_events(mut event_receiver: mpsc::Receiver<Value>) {
-    while let Some(event) = event_receiver.recv().await {
-        if let Some(event_type) = event.get("type").and_then(Value::as_str) {
-            match event_type {
-                "conversation.item.create" => {
-                    // Handle conversation item creation
-                    println!("New conversation item: {:?}", event);
-                },
-                "response.create" => {
-                    // Handle response creation
-                    println!("New response created: {:?}", event);
-                },
-                "error" => {
-                    // Handle error events
-                    println!("Error event: {:?}", event);
-                },
-                // Add more event types as needed
-                _ => println!("Unhandled event type: {}", event_type),
-            }
-        }
-    }
-}
-
-
-// Example usage of the RealtimeClient
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Connect to the WebSocket server
-    let mut client = RealtimeClient::new(None, None);
-    client.connect(None).await?;
-
-    // Start Handling Messages
-    client.start_handling_messages().await?;
-
-    // Send a user message
-    client.send_user_message_content(serde_json::json!({"text": "Hello, AI!"})).await?;
-
-
-    // Keep the main function alive to simulate continuous interaction
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-    }
-}
-
