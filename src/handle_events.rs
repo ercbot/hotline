@@ -2,12 +2,12 @@ use tokio::sync::mpsc;
 use std::io::{self, Write};
 use serde_json::Value;
 
-use crate::audio_utils::{base64_decode_audio, initialize_audio_stream, resample_audio, SERVER_SAMPLE_RATE};
+use crate::audio_utils::{convert_audio_from_server, initialize_playback_stream};
 
 
 pub async fn handle_events(mut event_receiver: mpsc::Receiver<Value>) {
     // Initialize the audio stream
-    let (audio_sender, output_sample_rate) = initialize_audio_stream();
+    let (audio_sender, output_sample_rate, output_channels) = initialize_playback_stream();
 
     while let Some(event) = event_receiver.recv().await {
         if let Some(event_type) = event.get("type").and_then(Value::as_str) {
@@ -30,20 +30,24 @@ pub async fn handle_events(mut event_receiver: mpsc::Receiver<Value>) {
                     // Handle audio delta events
                     let base64_audio_data = event["delta"].as_str().unwrap();
 
-                    // Decode the base64 audio data
-                    let samples = base64_decode_audio(base64_audio_data);
-
-                    // Resample the audio data to the output sample rate
-                    let resampled_samples = resample_audio(&samples, SERVER_SAMPLE_RATE, output_sample_rate);
+                    // Decode and resample the audio data to the output sample rate
+                    let samples = convert_audio_from_server(base64_audio_data, output_sample_rate, output_channels);
 
                     // Send the resampled samples to the audio thread
-                    if let Err(e) = audio_sender.send(resampled_samples) {
+                    if let Err(e) = audio_sender.send(samples) {
                         eprintln!("Failed to send audio samples: {}", e);
                     }
                 }
                 "error" => {
                     // Handle error events
                     println!("Error event: {:?}", event);
+                },
+                "input_audio_buffer.append" => {
+                    // Handle input audio buffer append events
+                },
+                "session.created" => {
+                    // Handle session created events
+                    println!("Session created successfully");
                 },
                 // Add more event types as needed
                 _ => println!("Unhandled event type: {}", event_type),
