@@ -161,9 +161,9 @@ impl RealtimeClient {
         Ok(())
     }
 
-    /// Sends a user message to the API
-    pub async fn send_user_message_content(&mut self, content: Value) -> Result<(), Box<dyn std::error::Error>> {
-        
+    /// Sends a message with the specified content to the API
+    /// 
+    pub async fn send_user_message_content(&mut self, content: Vec<Value>) -> Result<(), Box<dyn std::error::Error>> {
         self.send("conversation.item.create", Some(serde_json::json!({
             "item": {
                 "type": "message",
@@ -181,6 +181,22 @@ impl RealtimeClient {
     pub async fn create_response(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.send("response.create", None).await?;
         
+        Ok(())
+    }
+
+    /// Input audio buffer append
+    pub async fn input_audio_buffer_append(&mut self, base64_audio_data: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.send("input_audio_buffer.append", Some(serde_json::json!({
+            "audio": base64_audio_data
+        }))).await?;
+
+        Ok(())
+    }
+
+    /// Input audio buffer commit
+    pub async fn input_audio_buffer_commit(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.send("input_audio_buffer.commit", None).await?;
+
         Ok(())
     }
 
