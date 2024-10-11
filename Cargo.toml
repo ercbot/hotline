@@ -2,6 +2,13 @@
 name = "hotline"
 version = "0.1.0"
 edition = "2021"
+authors = ["Eric Botti <ericjbotti@gmail.com>"]
+license = "Apache-2.0"
+description = "A terminal based client for realtime multimodal AI"
+readme = "README.md"
+homepage = "https://github.com/ercbot/hotline"
+repository = "https://github.com/ercbot/hotline"
+
 
 [dependencies]
 cpal = "0.15.2"
