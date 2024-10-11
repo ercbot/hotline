@@ -45,7 +45,10 @@ impl Default for SessionConfig {
             input_audio_format: "pcm16".to_string(),
             output_audio_format: "pcm16".to_string(),
             input_audio_transcription: None,
-            turn_detection: None,
+            // turn_detection: None,
+            turn_detection: Some(serde_json::json!({
+                "type": "server_vad"
+            })),
             tools: Vec::new(),
             tool_choice: "auto".to_string(),
             temperature: 0.8,
