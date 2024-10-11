@@ -1,7 +1,6 @@
 use base64::prelude::*;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::mpsc;
-use crossbeam_channel::unbounded;
 use std::thread;
 
 use ringbuf::{traits::{Consumer, Observer, Producer, Split}, HeapRb};
@@ -13,11 +12,16 @@ const SERVER_CHANNELS: u16 = 1; // The number of channels coming from/going to t
 // TODO: create a ringbuffer for the audio before resampling as sample rate of the server is likely lower than that of the output device
 const RING_BUFFER_CAPACITY: usize = 2_400_000;
 
+pub enum PlaybackCommand {
+    Play(Vec<f32>),
+    Stop,
+}
+
 /// Initializes the audio stream and returns the audio sender and output sample rate.
 ///
 /// This function sets up the audio device, configures the output stream, and starts a separate
 /// thread to handle audio playback. It returns a sender for audio samples and the output sample rate.
-pub fn initialize_playback_stream() -> (mpsc::Sender<Vec<f32>>, u32, u16) {
+pub fn initialize_playback_stream() -> (mpsc::Sender<PlaybackCommand>, u32, u16) {
     // Initialize audio components
     let host = cpal::default_host();
     let device = host
@@ -28,9 +32,9 @@ pub fn initialize_playback_stream() -> (mpsc::Sender<Vec<f32>>, u32, u16) {
     let output_channels = config.channels();
 
     // Create a standard channel for audio samples
-    let (playback_tx, playback_rx) = mpsc::channel::<Vec<f32>>();
+    let (playback_tx, playback_rx) = mpsc::channel::<PlaybackCommand>();
 
-    // Clone the device and config to move into the audio thread
+    // Clone the device and config to move into the audio thread (We created them outside because we return the output sample rate)
     let device_clone = device.clone();
     let config_clone = config.clone();
 
@@ -42,7 +46,9 @@ pub fn initialize_playback_stream() -> (mpsc::Sender<Vec<f32>>, u32, u16) {
 
         // Create the ring buffer
         let audio_buffer = HeapRb::<f32>::new(RING_BUFFER_CAPACITY);
-        let (mut producer, mut consumer) = audio_buffer.split();
+        let (mut producer, consumer) = audio_buffer.split();
+        let consumer = std::sync::Arc::new(std::sync::Mutex::new(consumer));
+        let consumer_clone = std::sync::Arc::clone(&consumer);
 
         // Playback stream - continously pop samples from the ring buffer to play them
         let playback_stream = device
@@ -50,7 +56,7 @@ pub fn initialize_playback_stream() -> (mpsc::Sender<Vec<f32>>, u32, u16) {
                 &config.into(),
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     for sample in data.iter_mut() {
-                        *sample = consumer.try_pop().unwrap_or(0.0);
+                        *sample = consumer.lock().unwrap().try_pop().unwrap_or(0.0);
                     }
                 },
                 |err| eprintln!("An error occurred on the output stream: {}", err),
@@ -61,13 +67,20 @@ pub fn initialize_playback_stream() -> (mpsc::Sender<Vec<f32>>, u32, u16) {
         playback_stream.play().unwrap();
 
         // Continuously receive audio samples and push them into the ring buffer
-        while let Ok(samples) = playback_rx.recv() {
-            for sample in samples {
-                // Handle buffer full situation
-                if producer.is_full() {
-                    eprintln!("Warning: Audio buffer is full, dropping sample.");
-                } else {
-                    producer.try_push(sample).unwrap();
+        while let Ok(command) = playback_rx.recv() {
+            match command {
+                PlaybackCommand::Play(samples) => {
+                    for sample in samples {
+                        while producer.is_full() {
+                            // Sleep for a short duration if the buffer is full
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        producer.try_push(sample).unwrap();
+                    }
+                }
+                PlaybackCommand::Stop => {
+                    let mut consumer = consumer_clone.lock().unwrap();
+                    consumer.clear();
                 }
             }
         }
@@ -76,78 +89,6 @@ pub fn initialize_playback_stream() -> (mpsc::Sender<Vec<f32>>, u32, u16) {
     // Return the sender and output sample rate
     (playback_tx, output_sample_rate, output_channels)
 }
-
-
-const CHUNK_SIZE: usize = 2_400_000; // Adjust as needed
-
-pub fn initialize_recording_stream() -> (crossbeam_channel::Receiver<Vec<f32>>, u32) {
-    // Initialize audio components
-    let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .expect("No output device available");
-    let config = device.default_input_config().unwrap();
-    let input_sample_rate = config.sample_rate().0;
-
-    // Create a crossbeam channel for audio samples
-    let (recording_tx, recording_rx) = unbounded();
-
-    // Clone the device and config to move into the audio thread
-    let device_clone = device.clone();
-
-    // Start the audio recording thread
-    thread::spawn(move || {
-        // Use the cloned device and config to build the input stream
-        let device = device_clone;
-
-        // Create the ring buffer
-        let audio_buffer = HeapRb::<f32>::new(RING_BUFFER_CAPACITY);
-        let (mut producer, mut consumer) = audio_buffer.split();
-
-        // Recording stream - continuously push samples into the ring buffer
-        let recording_stream = device
-            .build_input_stream(
-                &config.into(),
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    for &sample in data.iter() {
-                        if producer.try_push(sample).is_err() {
-                            eprintln!("Warning: Audio Input buffer is full, dropping sample.");
-                        }
-                    }
-                },
-                |err| eprintln!("An error occurred on the input stream: {}", err),
-                None,
-            )
-            .unwrap();
-
-        recording_stream.play().unwrap();
-
-        // Continuously read from the ring buffer and send to the main thread
-        let mut buffer = Vec::with_capacity(CHUNK_SIZE);
-        loop {
-            buffer.clear();
-            for _ in 0..CHUNK_SIZE {
-                if let Some(sample) = consumer.try_pop() {
-                    buffer.push(sample);
-                } else {
-                    break;
-                }
-            }
-            if !buffer.is_empty() {
-                if recording_tx.send(buffer.clone()).is_err() {
-                    eprintln!("Main thread receiver disconnected. Stopping recording.");
-                    break;
-                }
-            }
-            thread::sleep(std::time::Duration::from_millis(10)); // Adjust sleep time as needed
-        }
-    });
-
-    // Return the receiver and input sample rate
-    (recording_rx, input_sample_rate)
-}
-
-
 
 /// Handling User Input -> Server
 /// Function to convert f32 audio samples to i16 PCM in base64 format
@@ -236,7 +177,12 @@ fn resample_and_convert_channels(
 
 pub fn convert_audio_to_server(samples: &[f32], sample_rate: u32, channels: u16) -> String {
     // Resample and convert channels to the server format
-    let samples = resample_and_convert_channels(samples, sample_rate, channels, SERVER_SAMPLE_RATE, SERVER_CHANNELS).unwrap()
+    let samples = resample_and_convert_channels(
+        samples, 
+        sample_rate, 
+        channels, 
+        SERVER_SAMPLE_RATE, 
+        SERVER_CHANNELS).unwrap();
 
     // Encode the audio data in base64 format
     base64_encode_audio(&samples)

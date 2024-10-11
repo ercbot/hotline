@@ -2,16 +2,11 @@ mod client;
 mod handle_events;
 mod audio_utils;
 
-mod debug_utils;
-
-use anyhow::Ok;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use debug_utils::save_audio_to_file;
-
-use std::{sync::{Arc, Mutex}, thread, time::{Duration, Instant}};
+use std::sync::{Arc, Mutex};
 
 use client::RealtimeClient;
-use audio_utils::{convert_audio_to_server, initialize_recording_stream, base64_decode_audio};
+use audio_utils::convert_audio_to_server;
 use tokio::sync::mpsc;
 
 
