@@ -10,7 +10,7 @@ use url::Url;
 
 use tokio::sync::mpsc;
 
-use crate::handle_events::handle_events;
+use crate::handle_events::{handle_events, Event, Source};
 
 // Defaults
 const DEFAULT_URL: &str = "wss://api.openai.com/v1/realtime";
@@ -68,7 +68,7 @@ pub struct RealtimeClient {
     ws_write: Option<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>,   // WebSocket write stream
 
     session_config: SessionConfig,                                  // Current session configuration
-    event_sender: mpsc::Sender<Value>,                              // Event sender
+    event_sender: mpsc::Sender<Event>,                              // Event sender
 }
 
 impl RealtimeClient {
@@ -215,7 +215,13 @@ impl RealtimeClient {
             match message {
                 Ok(Message::Text(text)) => {
                 if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                    if event_sender.send(value).await.is_err() {
+                    let event = Event {
+                        event_type: value["type"].as_str().unwrap().to_string(),
+                        source: Source::Server,
+                        data: value.clone(),
+                    };
+
+                    if event_sender.send(event).await.is_err() {
                     eprintln!("Error sending event through channel");
                     break;
                     }
@@ -235,20 +241,27 @@ impl RealtimeClient {
 
     /// Sends an event to WebSocket server
     async fn send(&mut self, event_type: &str, data: Option<Value>) -> Result<(), Box<dyn std::error::Error>> {
-        let mut event = serde_json::json!({
+        let mut event_data = serde_json::json!({
             "type": event_type,
             "event_id": Uuid::new_v4().to_string(),
         });
 
         if let Some(data) = data {
-            event.as_object_mut().unwrap().extend(data.as_object().unwrap().clone());
+            event_data.as_object_mut().unwrap().extend(data.as_object().unwrap().clone());
         }
 
         if let Some(ws_write) = &mut self.ws_write {
-            ws_write.send(Message::Text(serde_json::to_string(&event)?)).await?;
+            ws_write.send(Message::Text(serde_json::to_string(&event_data)?)).await?;
         } else {
             return Err(format!("Cannot send {} - client is not connected", event_type).into());
         }
+
+        // Send the event to the local event handler
+        let event = Event {
+            event_type: event_type.to_string(),
+            source: Source::Client,
+            data: event_data.clone(),
+        };
 
         // Also send the event to our local event handler
         self.event_sender.send(event).await
