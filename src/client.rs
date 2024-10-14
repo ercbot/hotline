@@ -3,7 +3,6 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest, MaybeTlsStream, WebSocketStream};
 use futures::{SinkExt, StreamExt};
-use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use uuid::Uuid;
 use url::Url;
@@ -11,51 +10,11 @@ use url::Url;
 use tokio::sync::mpsc;
 
 use crate::handle_events::{handle_events, Event, Source};
+use crate::config::SessionConfig;
 
 // Defaults
 const DEFAULT_URL: &str = "wss://api.openai.com/v1/realtime";
 const DEFAULT_MODEL: &str = "gpt-4o-realtime-preview-2024-10-01";
-
-
-// Define structs for various types used in the API
-
-/// Represents the configuration for a session with the OpenAI Realtime API
-#[derive(Debug, Serialize, Deserialize)]
-struct SessionConfig {
-    modalities: Vec<String>,        // Supported modalities (e.g., "text", "audio")
-    instructions: String,           // Custom instructions for the AI
-    voice: String,                  // Voice type for audio responses
-    input_audio_format: String,     // Format of input audio (e.g., "pcm16")
-    output_audio_format: String,    // Format of output audio
-    input_audio_transcription: Option<Value>,  // Configuration for audio transcription
-    turn_detection: Option<Value>,  // Configuration for turn detection in conversations
-    tools: Vec<Value>,              // Available tools or functions for the AI to use
-    tool_choice: String,            // How the AI should choose tools
-    temperature: f32,               // Controls randomness in AI responses
-    max_response_output_tokens: u32,  // Maximum number of tokens in AI responses
-}
-
-// Default SessionConfig implementation
-impl Default for SessionConfig {
-    fn default() -> Self {
-        Self {
-            modalities: vec!["text".to_string(), "audio".to_string()],
-            instructions: String::new(),
-            voice: "alloy".to_string(),
-            input_audio_format: "pcm16".to_string(),
-            output_audio_format: "pcm16".to_string(),
-            input_audio_transcription: None,
-            // turn_detection: None,
-            turn_detection: Some(serde_json::json!({
-                "type": "server_vad"
-            })),
-            tools: Vec::new(),
-            tool_choice: "auto".to_string(),
-            temperature: 0.8,
-            max_response_output_tokens: 4096,
-        }
-    }
-}
 
 /// Main client for interacting with the OpenAI Realtime API
 pub struct RealtimeClient {
@@ -67,7 +26,7 @@ pub struct RealtimeClient {
     ws_read: Option<SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>,    // WebSocket read stream
     ws_write: Option<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>,   // WebSocket write stream
 
-    session_config: SessionConfig,                                  // Current session configuration
+    pub session_config: SessionConfig,                                  // Current session configuration
     event_sender: mpsc::Sender<Event>,                              // Event sender
 }
 

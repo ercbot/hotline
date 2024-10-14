@@ -1,6 +1,7 @@
 mod client;
 mod handle_events;
 mod audio_utils;
+mod config;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,13 @@ use tokio::sync::mpsc;
 async fn main() -> Result<(), anyhow::Error> {
     // Connect to the WebSocket server
     let mut client = RealtimeClient::new(None, None);
+
+    // Load the configuration
+    let session_config = config::get_session_config()?;
+
+    // Update the client with the session configuration
+    client.session_config = session_config;
+
     client.connect(None).await.unwrap();
 
     // Get the default audio host
@@ -24,7 +32,6 @@ async fn main() -> Result<(), anyhow::Error> {
         .default_input_device()
         .expect("no input device available");
 
-    
     // Get the default input and output configuration and convert it to a StreamConfig
     let input_config = input_device.default_input_config()?.config();
     
@@ -38,16 +45,6 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // Create a channel for sending audio data
     let (sender, mut receiver) = mpsc::channel::<Vec<f32>>(10);
-
-    // Spawn a task to process and send audio data to the server
-    tokio::spawn(async move {
-        while let Some(buffer) = receiver.recv().await {
-            let base64_audio = convert_audio_to_server(&buffer, input_sample_rate, input_channels);
-            if let Err(e) = client.input_audio_buffer_append(&base64_audio).await {
-                eprintln!("Failed to send audio data to server: {}", e);
-            }
-        }
-    });
 
     // Set up the audio input stream
     let stream = input_device.build_input_stream(
@@ -70,6 +67,18 @@ async fn main() -> Result<(), anyhow::Error> {
     // Start the audio stream
     print!("Starting Recording...");
     stream.play()?;
+
+    // Spawn a task to process and send audio data to the server
+    tokio::spawn(async move {
+        while let Some(buffer) = receiver.recv().await {
+            let base64_audio = convert_audio_to_server(&buffer, input_sample_rate, input_channels);
+            if let Err(e) = client.input_audio_buffer_append(&base64_audio).await {
+                eprintln!("Failed to send audio data to server: {}", e);
+            }
+        }
+    });
+
+    
 
     // Keep the main task running and manage the stream
     loop {}

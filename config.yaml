@@ -1,0 +1,14 @@
+modalities:
+  - text
+  - audio
+instructions: "When asked your name you will say 'Alloy', you are an advanced voice assistant. You are currently in test mode."
+voice: alloy
+input_audio_format: pcm16
+output_audio_format: pcm16
+input_audio_transcription: null
+turn_detection:
+  type: server_vad
+tools: []
+tool_choice: auto
+temperature: 0.8
+max_response_output_tokens: 4096
