@@ -1,7 +1,11 @@
 use base64::prelude::*;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::Stream;
+use tokio::sync::mpsc as tokio_mpsc;
 use std::sync::mpsc;
 use std::thread;
+
+use std::sync::{Arc, Mutex};
 
 use ringbuf::{traits::{Consumer, Observer, Producer, Split}, HeapRb};
 
@@ -89,6 +93,57 @@ pub fn initialize_playback_stream() -> (mpsc::Sender<PlaybackCommand>, u32, u16)
     // Return the sender and output sample rate
     (playback_tx, output_sample_rate, output_channels)
 }
+
+
+pub fn initialize_recording_stream() -> Result<(tokio::sync::mpsc::Receiver<Vec<f32>>, u32, u16, Stream), cpal::PlayStreamError> {
+    // Get the default audio host
+    let host = cpal::default_host();
+    // Get default input and output devices, handling errors if they don't exist
+    let input_device = host
+        .default_input_device()
+        .expect("no input device available");
+
+    // Get the default input and output configuration and convert it to a StreamConfig
+    let input_config = input_device.default_input_config().map_err(|e| cpal::PlayStreamError::BackendSpecific { err: cpal::BackendSpecificError { description: e.to_string() } })?.config();
+    
+    // From the Input device, get sample rate, channel count
+    let input_sample_rate = input_config.sample_rate.0;
+    let input_channels = input_config.channels;
+
+    // Create a buffer that can store 200ms of audio data
+    let local_buffer_size = (input_sample_rate as f32 * input_channels as f32 * 0.4) as usize; // 2 bytes per sample (pcm-16)
+    let local_buffer = Arc::new(Mutex::new(Vec::with_capacity(local_buffer_size)));
+
+    // Create a channel for sending audio data
+    let (sender, receiver) = tokio_mpsc::channel::<Vec<f32>>(10);
+
+    // Set up the audio input stream
+    let stream = input_device.build_input_stream(
+        &input_config.into(),
+        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            let mut buffer = local_buffer.lock().unwrap();
+            buffer.extend_from_slice(data);
+            
+            if buffer.len() >= local_buffer_size {
+                let full_buffer = std::mem::replace(&mut *buffer, Vec::with_capacity(local_buffer_size));
+                if sender.blocking_send(full_buffer).is_err() {
+                    eprintln!("Failed to send audio data through channel");
+                }
+            }
+        },
+        |err| eprintln!("An error occurred on the input stream: {}", err),
+        None,
+    ).map_err(|e| cpal::PlayStreamError::BackendSpecific { err: cpal::BackendSpecificError { description: e.to_string() } })?;
+
+    // Start the audio stream
+    print!("Starting Recording...");
+    stream.play()?;
+
+    Ok((receiver, input_sample_rate, input_channels, stream))
+}
+
+
+
 
 /// Handling User Input -> Server
 /// Function to convert f32 audio samples to i16 PCM in base64 format
