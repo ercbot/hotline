@@ -1,14 +1,17 @@
-use tokio::sync::mpsc;
-use serde_json::Value;
+use crate::audio_utils::{convert_audio_from_server, initialize_playback_stream, PlaybackCommand};
+use crate::display_transcript::create_transcript_display;
 use crossterm::{
+    cursor::{MoveTo, RestorePosition, SavePosition},
     execute,
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{Clear, ClearType},
-    cursor::{MoveTo, SavePosition, RestorePosition},
 };
-use std::io::{stdout, Result};
-
-use crate::audio_utils::{convert_audio_from_server, initialize_playback_stream, PlaybackCommand};
+use serde_json::Value;
+use std::{
+    collections::HashMap,
+    io::{stdout, Result},
+};
+use tokio::sync::mpsc;
 
 pub enum Source {
     Server,
@@ -21,34 +24,73 @@ pub struct Event {
     pub data: Value,
 }
 
+// Define the console display mode as a closure with state
+pub fn create_console_display() -> impl FnMut(&Event) -> Result<()> {
+    let mut previous_event = String::new();
+    let mut consecutive_count = 1;
+    let mut current_line = 0;
+
+    move |event: &Event| -> Result<()> {
+        let mut stdout = stdout();
+        let event_type = &event.event_type;
+
+        if event_type != &previous_event {
+            consecutive_count = 1;
+            current_line += 1;
+        } else {
+            consecutive_count += 1;
+        }
+
+        // Display the event
+        execute!(stdout, SavePosition)?;
+        execute!(stdout, MoveTo(0, current_line - 1))?;
+        execute!(stdout, Clear(ClearType::CurrentLine))?;
+        let (color, source_str) = match event.source {
+            Source::Server => (Color::Green, "server"),
+            Source::Client => (Color::Blue, "client"),
+        };
+        execute!(
+            stdout,
+            SetForegroundColor(color),
+            Print(source_str),
+            ResetColor,
+        )?;
+        execute!(
+            stdout,
+            Print(format!(" {} ({})", event_type, consecutive_count))
+        )?;
+        execute!(stdout, RestorePosition)?;
+
+        previous_event = event_type.clone();
+
+        Ok(())
+    }
+}
+
 pub async fn handle_events(mut event_receiver: mpsc::Receiver<Event>) {
+    // Clear the screen before starting
+    execute!(stdout(), Clear(ClearType::All)).unwrap();
+
     // Initialize the audio stream
     let (audio_sender, output_sample_rate, output_channels) = initialize_playback_stream();
 
     // Clear the screen before starting
     execute!(stdout(), Clear(ClearType::All)).unwrap();
 
-    // Initalizing the console dispaly vars
-    let mut previous_event = String::new();
-    let mut consecutive_count = 1;
-    let mut current_line = 0;
+    // Create display modes
+    let mut console_display = create_console_display();
+    let mut transcript_display = create_transcript_display();
+
+    // Current display mode (switch as needed)
+    let current_display_mode = "transcript";
 
     while let Some(event) = event_receiver.recv().await {
-        // Display the event in the console
-        let event_type = event.event_type.clone();
-
-        if event_type != previous_event {
-            // If the event type is different from the previous event, display the new event
-            display_event_console(&event_type, event.source, 1, current_line).unwrap();
-            consecutive_count = 1;
-            current_line += 1;
-        } else {
-            // If the event type is the same as the previous event, increment the count
-            consecutive_count += 1;
-            display_event_console(&event.event_type, event.source, consecutive_count, current_line).unwrap();
+        // Use the appropriate display mode
+        match current_display_mode {
+            "console" => console_display(&event).unwrap(),
+            "transcript" => transcript_display(&event).unwrap(),
+            _ => (),
         }
-
-        previous_event = event_type.clone();
 
         match event.event_type.as_str() {
             "response.audio_transcript.delta" => {
@@ -58,68 +100,33 @@ pub async fn handle_events(mut event_receiver: mpsc::Receiver<Event>) {
                 // // Print the transcript
                 // print!("{}", transcript);
                 // io::stdout().flush().unwrap();
-            },
+            }
             "response.audio.delta" => {
                 // Handle audio delta events
                 let base64_audio_data = event.data["delta"].as_str().unwrap();
 
                 // Decode and resample the audio data to the output sample rate
-                let samples = convert_audio_from_server(base64_audio_data, output_sample_rate, output_channels);
+                let samples = convert_audio_from_server(
+                    base64_audio_data,
+                    output_sample_rate,
+                    output_channels,
+                );
 
                 // Send the resampled samples to the audio thread
                 if let Err(e) = audio_sender.send(PlaybackCommand::Play(samples)) {
                     eprintln!("Failed to send audio samples: {}", e);
                 }
-            },
+            }
             "input_audio_buffer.speech_started" => {
                 // Handle speech started events
                 audio_sender.send(PlaybackCommand::Stop).unwrap();
-            },
+            }
             "error" => {
                 // Handle error events
                 println!("error: {:?}", event.data);
-            },
+            }
             // Add more event types as needed
             _ => {}
         }
     }
-}
-
-
-fn display_event_console(event_type: &str, source: Source, count: usize, line: u16) -> Result<()> {
-    let mut stdout = stdout();
-    
-    // Save cursor position
-    execute!(stdout, SavePosition)?;
-    
-    // Move to the specific line
-    execute!(stdout, MoveTo(0, line))?;
-    
-    // Clear the current line
-    execute!(stdout, Clear(ClearType::CurrentLine))?;
-    
-    // Set color based on event source
-    let (color, source_str) = match source {
-        Source::Server => (Color::Green, "server"),
-        Source::Client => (Color::Blue, "client"),
-    };
-
-    // Print the colored source
-    execute!(
-        stdout,
-        SetForegroundColor(color),
-        Print(source_str),
-        ResetColor,
-    )?;
-
-    // Print the rest of the message in default color
-    execute!(
-        stdout,
-        Print(format!(" {} ({})", event_type, count)),
-    )?;
-    
-    // Restore cursor position
-    execute!(stdout, RestorePosition)?;
-    
-    Ok(())
 }

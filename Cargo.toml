@@ -26,3 +26,4 @@ uuid = { version = "1.10.0", features = ["v4"]}
 config = { version = "0.14", features = ["yaml"] }
 ringbuf = "0.4.7"
 clap = { version = "4.5.20", features = ["derive"] }
+textwrap = "0.16.1"
