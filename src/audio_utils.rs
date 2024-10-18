@@ -1,13 +1,16 @@
 use base64::prelude::*;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
-use tokio::sync::mpsc as tokio_mpsc;
 use std::sync::mpsc;
 use std::thread;
+use tokio::sync::mpsc as tokio_mpsc;
 
 use std::sync::{Arc, Mutex};
 
-use ringbuf::{traits::{Consumer, Observer, Producer, Split}, HeapRb};
+use ringbuf::{
+    traits::{Consumer, Observer, Producer, Split},
+    HeapRb,
+};
 
 const SERVER_SAMPLE_RATE: u32 = 24000; // The sample rate coming from/going to the server
 const SERVER_CHANNELS: u16 = 1; // The number of channels coming from/going to the server
@@ -94,8 +97,8 @@ pub fn initialize_playback_stream() -> (mpsc::Sender<PlaybackCommand>, u32, u16)
     (playback_tx, output_sample_rate, output_channels)
 }
 
-
-pub fn initialize_recording_stream() -> Result<(tokio::sync::mpsc::Receiver<Vec<f32>>, u32, u16, Stream), cpal::PlayStreamError> {
+pub fn initialize_recording_stream(
+) -> Result<(tokio::sync::mpsc::Receiver<Vec<f32>>, u32, u16, Stream), cpal::PlayStreamError> {
     // Get the default audio host
     let host = cpal::default_host();
     // Get default input and output devices, handling errors if they don't exist
@@ -104,8 +107,15 @@ pub fn initialize_recording_stream() -> Result<(tokio::sync::mpsc::Receiver<Vec<
         .expect("no input device available");
 
     // Get the default input and output configuration and convert it to a StreamConfig
-    let input_config = input_device.default_input_config().map_err(|e| cpal::PlayStreamError::BackendSpecific { err: cpal::BackendSpecificError { description: e.to_string() } })?.config();
-    
+    let input_config = input_device
+        .default_input_config()
+        .map_err(|e| cpal::PlayStreamError::BackendSpecific {
+            err: cpal::BackendSpecificError {
+                description: e.to_string(),
+            },
+        })?
+        .config();
+
     // From the Input device, get sample rate, channel count
     let input_sample_rate = input_config.sample_rate.0;
     let input_channels = input_config.channels;
@@ -118,22 +128,29 @@ pub fn initialize_recording_stream() -> Result<(tokio::sync::mpsc::Receiver<Vec<
     let (sender, receiver) = tokio_mpsc::channel::<Vec<f32>>(10);
 
     // Set up the audio input stream
-    let stream = input_device.build_input_stream(
-        &input_config.into(),
-        move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            let mut buffer = local_buffer.lock().unwrap();
-            buffer.extend_from_slice(data);
-            
-            if buffer.len() >= local_buffer_size {
-                let full_buffer = std::mem::replace(&mut *buffer, Vec::with_capacity(local_buffer_size));
-                if sender.blocking_send(full_buffer).is_err() {
-                    eprintln!("Failed to send audio data through channel");
+    let stream = input_device
+        .build_input_stream(
+            &input_config.into(),
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                let mut buffer = local_buffer.lock().unwrap();
+                buffer.extend_from_slice(data);
+
+                if buffer.len() >= local_buffer_size {
+                    let full_buffer =
+                        std::mem::replace(&mut *buffer, Vec::with_capacity(local_buffer_size));
+                    if sender.blocking_send(full_buffer).is_err() {
+                        eprintln!("Failed to send audio data through channel");
+                    }
                 }
-            }
-        },
-        |err| eprintln!("An error occurred on the input stream: {}", err),
-        None,
-    ).map_err(|e| cpal::PlayStreamError::BackendSpecific { err: cpal::BackendSpecificError { description: e.to_string() } })?;
+            },
+            |err| eprintln!("An error occurred on the input stream: {}", err),
+            None,
+        )
+        .map_err(|e| cpal::PlayStreamError::BackendSpecific {
+            err: cpal::BackendSpecificError {
+                description: e.to_string(),
+            },
+        })?;
 
     // Start the audio stream
     print!("Starting Recording...");
@@ -141,9 +158,6 @@ pub fn initialize_recording_stream() -> Result<(tokio::sync::mpsc::Receiver<Vec<
 
     Ok((receiver, input_sample_rate, input_channels, stream))
 }
-
-
-
 
 /// Handling User Input -> Server
 /// Function to convert f32 audio samples to i16 PCM in base64 format
@@ -171,9 +185,8 @@ fn base64_decode_audio(base64_audio_data: &str) -> Vec<f32> {
         .collect()
 }
 
-
-/// Basic resample and channel conversion 
-/// 
+/// Basic resample and channel conversion
+///
 /// Resamples audio data from one sample rate and number of channels.
 /// cpal uses interleaved samples by default, so stereo is actually one big channel [L, R, L, R, ...].
 fn resample_and_convert_channels(
@@ -181,7 +194,7 @@ fn resample_and_convert_channels(
     current_sample_rate: u32,
     current_num_channels: u16,
     target_sample_rate: u32,
-    target_num_channels: u16
+    target_num_channels: u16,
 ) -> Result<Vec<f32>, &'static str> {
     // Validate input
     if current_num_channels != 1 && current_num_channels != 2 {
@@ -196,17 +209,17 @@ fn resample_and_convert_channels(
 
     // Calculate the resample ratio
     let resample_ratio = target_sample_rate as f32 / current_sample_rate as f32;
-    
+
     // Calculate the output length (before channel conversion)
     let resampled_length = (samples.len() as f32 * resample_ratio) as usize;
-    
+
     // Perform resampling
     let mut resampled_audio = Vec::with_capacity(resampled_length);
     for i in 0..resampled_length {
         let index = i as f32 / resample_ratio;
         let index_floor = index.floor() as usize;
         let index_ceil = (index_floor + 1).min(samples.len() - 1);
-        
+
         // Perform linear interpolation between the floor and ceiling samples
         let t = index.fract(); // weight for interpolation
         let sample = samples[index_floor] * (1.0 - t) + samples[index_ceil] * t;
@@ -218,35 +231,50 @@ fn resample_and_convert_channels(
         (1, 2) => {
             // Mono to stereo: duplicate each sample
             resampled_audio.iter().flat_map(|&s| vec![s, s]).collect()
-        },
+        }
         (2, 1) => {
             // Stereo to mono: average each pair of samples
-            resampled_audio.chunks(2).map(|chunk| chunk.iter().sum::<f32>() / 2.0).collect()
-        },
+            resampled_audio
+                .chunks(2)
+                .map(|chunk| chunk.iter().sum::<f32>() / 2.0)
+                .collect()
+        }
         _ => resampled_audio, // No conversion needed (mono to mono or stereo to stereo)
     };
 
     Ok(converted_audio)
 }
 
-
 pub fn convert_audio_to_server(samples: &[f32], sample_rate: u32, channels: u16) -> String {
     // Resample and convert channels to the server format
     let samples = resample_and_convert_channels(
-        samples, 
-        sample_rate, 
-        channels, 
-        SERVER_SAMPLE_RATE, 
-        SERVER_CHANNELS).unwrap();
+        samples,
+        sample_rate,
+        channels,
+        SERVER_SAMPLE_RATE,
+        SERVER_CHANNELS,
+    )
+    .unwrap();
 
     // Encode the audio data in base64 format
     base64_encode_audio(&samples)
 }
 
-pub fn convert_audio_from_server(base64_audio_data: &str, sample_rate: u32, channels: u16) -> Vec<f32> {
+pub fn convert_audio_from_server(
+    base64_audio_data: &str,
+    sample_rate: u32,
+    channels: u16,
+) -> Vec<f32> {
     // Decode the base64 audio data
     let samples = base64_decode_audio(base64_audio_data);
 
     // Resample and convert channels from the server format
-    resample_and_convert_channels(&samples, SERVER_SAMPLE_RATE, SERVER_CHANNELS, sample_rate, channels).unwrap()
+    resample_and_convert_channels(
+        &samples,
+        SERVER_SAMPLE_RATE,
+        SERVER_CHANNELS,
+        sample_rate,
+        channels,
+    )
+    .unwrap()
 }
